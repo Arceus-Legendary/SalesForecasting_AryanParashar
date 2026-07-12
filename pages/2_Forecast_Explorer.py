@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
+from xgboost import XGBRegressor
 import plotly.graph_objects as go
 import os
 
@@ -58,21 +58,6 @@ st.markdown('<div class="main-title">🔮 Demand Forecast Explorer</div>', unsaf
 st.markdown("Use the pre-trained XGBoost model to generate monthly sales forecasts by category or geographic region.", unsafe_allow_html=True)
 st.markdown("---")
 
-# Helper function to load model and dataset
-@st.cache_resource
-def load_model_assets():
-    model = None
-    if os.path.exists("xgboost_sales_model.pkl"):
-        model = joblib.load("xgboost_sales_model.pkl")
-    else:
-        st.error("Error: 'xgboost_sales_model.pkl' not found. Please place the model file in the root directory.")
-    
-    features_df = None
-    if os.path.exists("xgboost_features.csv"):
-        features_df = pd.read_csv("xgboost_features.csv")
-    
-    return model, features_df
-
 @st.cache_data
 def load_sales_data():
     if os.path.exists("cleaned_sales.csv"):
@@ -81,11 +66,10 @@ def load_sales_data():
         return df
     return pd.DataFrame()
 
-xgb_model, xgb_features = load_model_assets()
 sales_df = load_sales_data()
 
-if xgb_model is None or sales_df.empty:
-    st.warning("⚠️ Waiting for forecasting model and sales database files to be available.")
+if sales_df.empty:
+    st.warning("⚠️ Waiting for sales database files to be available.")
 else:
     # Sidebar control panel
     with st.sidebar:
@@ -129,6 +113,27 @@ else:
         
     monthly_series = monthly_series.sort_index()
     
+    # 1.5 Train dynamic XGBoost model for the selected segment
+    # Prepare lag features exactly as used in Task 3
+    train_df = monthly_series.to_frame()
+    train_df.columns = ["Sales"]
+    train_df["Lag1"] = train_df["Sales"].shift(1)
+    train_df["Lag2"] = train_df["Sales"].shift(2)
+    train_df["Lag3"] = train_df["Sales"].shift(3)
+    train_df["RollingMean"] = train_df["Sales"].rolling(3).mean()
+    train_df["Month"] = train_df.index.month
+    train_df["Quarter"] = train_df.index.quarter
+    train_df["Season"] = (train_df.index.month % 12 + 3) // 3
+    train_df = train_df.dropna()
+    
+    features_list = ['Lag1', 'Lag2', 'Lag3', 'RollingMean', 'Month', 'Quarter', 'Season']
+    X_train = train_df[features_list]
+    y_train = train_df["Sales"]
+    
+    # Train the regressor dynamically
+    xgb_model = XGBRegressor(random_state=42)
+    xgb_model.fit(X_train, y_train)
+    
     # 2. Perform Autoregressive Multi-step forecasting
     # We need the last 3 months of actual sales to compute initial lags
     last_date = monthly_series.index[-1]
@@ -171,10 +176,8 @@ else:
             'Season': season_val
         }])
         
-        # Predict using pre-trained model
-        pred_sales = xgb_model.predict(feature_vector)[0]
-        # Avoid negative sales forecasts
-        pred_sales = max(0.0, float(pred_sales))
+        # Predict using dynamically trained model
+        pred_sales = float(xgb_model.predict(feature_vector)[0])
         
         predictions.append(pred_sales)
         
